@@ -1,0 +1,72 @@
+
+// 2. Cargar colección Sentinel-2 Level-2A (con SCL)
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(lago)
+  .filterDate('2015-01-01', '2024-12-31')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 5));
+
+// 3. Función para enmascarar nubes y nieve
+
+function maskCloudAndSnow(image) {
+  var scl = image.select('SCL');
+  var mask = scl.neq(8) // nubes medianas
+    .and(scl.neq(3)) // sombra
+    .and(scl.neq(9)) // nubes altas
+    .and(scl.neq(10)) // cirros
+    .and(scl.neq(11)) // nieve
+    .and(scl.neq(1)) // saturado
+    .and(scl.eq(6));
+  return image.updateMask(mask);
+}
+
+// 4. Función para calcular NDWI
+function computeNDWI(image) {
+  var ndwi = image.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  return image.addBands(ndwi).select('NDWI').copyProperties(image, ['system:time_start']);
+}
+
+// Aplicar máscara y calcular NDWI
+var ndwiCollection = s2
+  .map(maskCloudAndSnow)
+  .map(computeNDWI);
+
+// 5. Binarizar NDWI (>0.3 como agua, podés ajustar este umbral)
+var binarized = ndwiCollection.map(function(image) {
+  var bin = image.gt(0.35).rename('waterMask');
+  return bin.copyProperties(image, ['system:time_start']);
+});
+
+// 6. Recorte a la geometría del lago
+var binarizedCropped = binarized.map(function(image) {
+  return image.clip(lago);  // Recorta cada imagen a la geometría del lago
+});
+
+// 7. Acumular ocurrencias de agua
+var totalImages = binarizedCropped.size();
+var sumWater = binarizedCropped.reduce(ee.Reducer.sum());
+
+// Calcular proporción de veces que fue agua
+var waterFrequency = sumWater.divide(totalImages).rename('freq');
+
+// 8. Filtrar píxeles que fueron agua en >= 90% de las fechas
+var waterPersistent = waterFrequency.gte(0.2).selfMask();
+
+// 9. Poligonizar y exportar
+var waterVector = waterPersistent.reduceToVectors({
+  geometry: lago,
+  geometryType: 'polygon',
+  scale: 10,
+  maxPixels: 1e10
+});
+
+// Visualizar
+Map.centerObject(lago, 17);
+Map.addLayer(waterFrequency, {min: 0, max: 1, palette: ['white', 'blue']}, 'Frecuencia Agua');
+Map.addLayer(waterVector, {}, 'Polígono persistente');
+
+// Exportar a Drive
+Export.table.toDrive({
+  collection: waterVector,
+  description: 'Poligono_agua_persistente_Tupungatito',
+  fileFormat: 'SHP'
+});
