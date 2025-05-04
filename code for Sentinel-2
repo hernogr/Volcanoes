@@ -35,7 +35,7 @@ var mndwiCollection = s2
   .map(maskCloudAndSnow)
   .map(computeMNDWI);
 
-// 6. Binarizar MNDWI (>0.35 como agua, ajustable)
+// 6. Binarizar MNDWI (>0.55 como agua, ajustable)
 var binarized = mndwiCollection.map(function(image) {
   var bin = image.gt(0.55).rename('waterMask');
   return bin.copyProperties(image, ['system:time_start']);
@@ -53,7 +53,7 @@ var sumWater = binarizedCropped.reduce(ee.Reducer.sum());
 // 9. Calcular frecuencia de ocurrencia de agua
 var waterFrequency = sumWater.divide(totalImages).rename('freq');
 
-// 10. Filtrar por persistencia >= 20%
+// 10. Filtrar por persistencia >= 23%
 var waterPersistent = waterFrequency.gte(0.23).selfMask();
 
 // 11. Poligonizar
@@ -90,9 +90,18 @@ var histogram = ui.Chart.image.histogram({
   colors: ['#1f78b4']
 });
 
+// Exportar el histograma de frecuencia como CSV
+Export.table.toDrive({
+  collection: ee.FeatureCollection([ee.Feature(null, {
+    'histogram': histogram.getChart() // Obtiene los datos del gráfico
+  })]),
+  description: 'Histograma_Frecuencia_Agua',
+  fileFormat: 'CSV'
+});
+
 print(histogram);
 
-// Seleccioná una imagen representativa (por ejemplo, la mediana de toda la colección)
+// Seleccionar una imagen representativa (por ejemplo, la mediana de toda la colección)
 var mndwiMedian = mndwiCollection.median();  // ndwiCollection en este caso es con MNDWI
 
 // Histograma de valores de MNDWI dentro del lago
@@ -107,6 +116,16 @@ var mndwiHist = ui.Chart.image.histogram({
   vAxis: {title: 'Número de píxeles'},
   colors: ['green']
 });
+
+// Exportar el histograma de MNDWI como CSV
+Export.table.toDrive({
+  collection: ee.FeatureCollection([ee.Feature(null, {
+    'histogram': mndwiHist.getChart() // Obtiene los datos del gráfico
+  })]),
+  description: 'Histograma_MNDWI_Lago',
+  fileFormat: 'CSV'
+});
+
 
 print(mndwiHist);
 
