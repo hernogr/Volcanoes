@@ -1,3 +1,4 @@
+// 1. Geometría 'lago' ya definida manualmente
 
 // 2. Cargar colección Sentinel-2 Level-2A (con SCL)
 var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
@@ -5,53 +6,57 @@ var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
   .filterDate('2015-01-01', '2024-12-31')
   .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 5));
 
-// 3. Función para enmascarar nubes y nieve
-
+// 3. Función para enmascarar nubes, sombras, nieve y otros
 function maskCloudAndSnow(image) {
   var scl = image.select('SCL');
-  var mask = scl.neq(8) // nubes medianas
-    .and(scl.neq(3)) // sombra
-    .and(scl.neq(9)) // nubes altas
-    .and(scl.neq(10)) // cirros
-    .and(scl.neq(11)) // nieve
-    .and(scl.neq(1)) // saturado
-    .and(scl.eq(6));
+  var mask = scl.neq(8)  // nubes medianas
+    .and(scl.neq(3))     // sombra
+    .and(scl.neq(9))     // nubes altas
+    .and(scl.neq(10))    // cirros
+    .and(scl.neq(11))    // nieve
+    .and(scl.neq(1))     // saturado
+    .and(scl.eq(6));     // agua
   return image.updateMask(mask);
 }
 
-// 4. Función para calcular NDWI
-function computeNDWI(image) {
-  var ndwi = image.normalizedDifference(['B3', 'B8']).rename('NDWI');
-  return image.addBands(ndwi).select('NDWI').copyProperties(image, ['system:time_start']);
+// 4. Función para calcular MNDWI con resampleo explícito de B11
+function computeMNDWI(image) {
+  var b3 = image.select('B3');
+  var b11 = image.select('B11')
+                 .resample('bilinear')
+                 .reproject({crs: b3.projection()});
+  var mndwi = b3.subtract(b11).divide(b3.add(b11)).rename('MNDWI');
+  return image.addBands(mndwi).select('MNDWI')
+    .copyProperties(image, ['system:time_start']);
 }
 
-// Aplicar máscara y calcular NDWI
-var ndwiCollection = s2
+// 5. Aplicar máscara y calcular MNDWI
+var mndwiCollection = s2
   .map(maskCloudAndSnow)
-  .map(computeNDWI);
+  .map(computeMNDWI);
 
-// 5. Binarizar NDWI (>0.3 como agua, podés ajustar este umbral)
-var binarized = ndwiCollection.map(function(image) {
-  var bin = image.gt(0.35).rename('waterMask');
+// 6. Binarizar MNDWI (>0.35 como agua, ajustable)
+var binarized = mndwiCollection.map(function(image) {
+  var bin = image.gt(0.55).rename('waterMask');
   return bin.copyProperties(image, ['system:time_start']);
 });
 
-// 6. Recorte a la geometría del lago
+// 7. Recorte a geometría del lago
 var binarizedCropped = binarized.map(function(image) {
-  return image.clip(lago);  // Recorta cada imagen a la geometría del lago
+  return image.clip(lago);
 });
 
-// 7. Acumular ocurrencias de agua
+// 8. Acumulación de ocurrencias de agua
 var totalImages = binarizedCropped.size();
 var sumWater = binarizedCropped.reduce(ee.Reducer.sum());
 
-// Calcular proporción de veces que fue agua
+// 9. Calcular frecuencia de ocurrencia de agua
 var waterFrequency = sumWater.divide(totalImages).rename('freq');
 
-// 8. Filtrar píxeles que fueron agua en >= 90% de las fechas
-var waterPersistent = waterFrequency.gte(0.2).selfMask();
+// 10. Filtrar por persistencia >= 20%
+var waterPersistent = waterFrequency.gte(0.23).selfMask();
 
-// 9. Poligonizar y exportar
+// 11. Poligonizar
 var waterVector = waterPersistent.reduceToVectors({
   geometry: lago,
   geometryType: 'polygon',
@@ -59,14 +64,72 @@ var waterVector = waterPersistent.reduceToVectors({
   maxPixels: 1e10
 });
 
-// Visualizar
+// 12. Visualización
 Map.centerObject(lago, 17);
 Map.addLayer(waterFrequency, {min: 0, max: 1, palette: ['white', 'blue']}, 'Frecuencia Agua');
 Map.addLayer(waterVector, {}, 'Polígono persistente');
 
-// Exportar a Drive
+// 13. Exportar a Drive como SHP
 Export.table.toDrive({
   collection: waterVector,
-  description: 'Poligono_agua_persistente_Tupungatito',
+  description: 'Poligono_agua_persistente_MNDWI_2',
   fileFormat: 'SHP'
 });
+
+
+// Histograma de frecuencias dentro de la geometría 'lago'
+var histogram = ui.Chart.image.histogram({
+  image: waterFrequency.updateMask(waterFrequency.gt(0.1)),  // <- Filtra valores > 0
+  region: lago,
+  scale: 10,
+  minBucketWidth: 0.05
+}).setOptions({
+  title: 'Distribución de frecuencia de aparición de agua (> 0)',
+  hAxis: {title: 'Frecuencia (0-1)'},
+  vAxis: {title: 'Número de píxeles'},
+  colors: ['#1f78b4']
+});
+
+print(histogram);
+
+// Seleccioná una imagen representativa (por ejemplo, la mediana de toda la colección)
+var mndwiMedian = mndwiCollection.median();  // ndwiCollection en este caso es con MNDWI
+
+// Histograma de valores de MNDWI dentro del lago
+var mndwiHist = ui.Chart.image.histogram({
+  image: mndwiMedian,
+  region: lago,
+  scale: 10,
+  minBucketWidth: 0.05
+}).setOptions({
+  title: 'Distribución de valores MNDWI en el lago',
+  hAxis: {title: 'MNDWI'},
+  vAxis: {title: 'Número de píxeles'},
+  colors: ['green']
+});
+
+print(mndwiHist);
+
+// 1. Reducir la región con histograma
+var histoDict = ee.Image(mndwiMedian).reduceRegion({
+  reducer: ee.Reducer.histogram({maxBuckets: 100}),
+  geometry: lago,
+  scale: 10,
+  bestEffort: true
+});
+
+// 2. Extraer el histograma como un ee.Dictionary
+var histogram = ee.Dictionary(histoDict.get('MNDWI'));
+
+// Enmascarar valores menores a 0.1
+var waterFrequencyMasked = waterFrequency.updateMask(waterFrequency.gt(0.1));
+
+// Calcular los percentiles de los valores mayores a 0.01
+var frecuencyStats = waterFrequencyMasked.reduceRegion({
+  reducer: ee.Reducer.percentile([25, 50, 75]),
+  geometry: lago,
+  scale: 10,
+  maxPixels: 1e10
+});
+
+print('Percentiles Frecuencia (>0.1)', frecuencyStats);
